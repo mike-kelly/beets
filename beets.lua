@@ -1,14 +1,19 @@
+-- MoBeets
+-- 0.1.0 @Lemmy
+--
+-- Forked from
 -- Beets
 -- 1.1.1 @mattbiddulph
 --
 -- Probabilistic performance
 -- drum loop re-sequencer
 --
--- Put one-bar WAVs in folders
+-- Put one-bar or two-bar WAVs in folders
 -- in dust/audio/beets
 --
 -- K2 : Quantized mute toggle
 -- K3 : Instant mute while held
+-- Enc2: Switch between Voice 1 and Voice 2
 --
 -- Use a Grid, or map
 -- MIDI controller to params
@@ -25,21 +30,35 @@ local Passthrough = include('lib/passthrough')
 local Arcify = include('lib/arcify')
 local arcify = Arcify.new()
 
-local beets = Beets.new {softcut_voice_id = 1}
-local beets2 = Beets.new {softcut_voice_id = 2}
+local current_voice = 1
+local previous_voice = 1
+
+local beets = Beets.new {softcut_voice_id = 1, current_voice = current_voice}
+local beets2 = Beets.new {softcut_voice_id = 2, current_voice = current_voice}
 
 local editing = false
 local g = grid.connect()
 
+-- handle grid inputs
 g.key = function(x, y, z)
   if params:get('orientation') == 1 then -- horizontal
-    if x < 9 then
+    if y == 1 then
+      -- editing loop start and end in top row
+      if current_voice == 1 then
+        beets:grid_key(x, y, z)
+      else
+        beets2:grid_key(x, y, z)
+      end
+    elseif x < 9 then
       beets:grid_key(x, y, z)
     else
       beets2:grid_key(x - 8, y, z)
     end
-  else
-    if y < 9 then
+  else -- vertical
+    if beets.bars_per_loop > 1 or beets2.bars_per_loop > 1 then
+      beets.status = 'Horizontal orientation required'
+      return
+    elseif y < 9 then
       beets:grid_key(x, y, z)
     else
       beets2:grid_key(x, y - 8, z)
@@ -53,38 +72,60 @@ local function init_crow()
   crow.output[4].action = 'pulse(0.001, 5, 1)'
 end
 
+local function multibar_loops_in_use()
+  return (beets.bars_per_loop > 1 or beets2.bars_per_loop > 1)
+end
+
 local function beat()
   while true do
     clock.sync(1 / 2)
-    local beatstep = math.floor(clock.get_beats() * 2) % 8
+    local beatstep = math.floor(clock.get_beats() * 2) % beets.beat_count
     beets:advance_step(beatstep, clock.get_tempo())
     beets2:advance_step(beatstep, clock.get_tempo())
     redraw()
-    beets:drawGridUI(g, 1, 1)
-    if params:get('orientation') == 1 then -- horizontal
-      beets2:drawGridUI(g, 9, 1)
+    if current_voice ~= previous_voice then
+      g:all(0) -- clear the grid
+      previous_voice = current_voice
+    end
+    if multibar_loops_in_use() == false then
+      if params:get('orientation') == 1 then -- horizontal
+        beets:drawGridUI(g, 1, 1, current_voice)
+        beets2:drawGridUI(g, 9, 1, current_voice)
+      else
+        beets:drawGridUI(g, 1, 1, current_voice)
+        beets2:drawGridUI(g, 1, 9, current_voice)
+      end
     else
-      beets2:drawGridUI(g, 1, 9)
+      beets:drawGridUI(g, 1, 1, current_voice)
+      beets2:drawGridUI(g, 9, 1, current_voice)
     end
     g:refresh()
   end
 end
 
 function redraw()
-  beets:drawUI()
+  if current_voice == 1 then
+    beets:drawUI(multibar_loops_in_use(), current_voice)
+  else
+    beets2:drawUI(multibar_loops_in_use(), current_voice)
+  end
 end
 
 function enc(n, d)
   if editing then
     beets:enc(n, d)
+  elseif n == 2 then
+    current_voice = util.clamp(current_voice + d, 1, 2)
   end
 end
 
 function key(n, z)
-  if n == 1 and z == 1 then
-    editing = true
-    beets:edit_mode_begin()
-  end
+
+  --  if n == 1 and z == 1 then
+  --    editing = true
+  --    beets:edit_mode_begin()
+  --  end
+
   if editing then
     if n == 1 and z == 0 then
       editing = false

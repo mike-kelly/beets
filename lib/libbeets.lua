@@ -25,7 +25,9 @@ function Beets.new(options)
     running = false,
     enable_mutations = true,
     id = softcut_voice_id,
-    beat_count = 8,
+    bars_per_loop = 1,
+    beat_count = 8, -- total beats in bars
+    beats_per_bar = 8, -- beats in one bar
     loops_by_filename = {},
     loop_index_to_filename = {},
     loop_count = 0,
@@ -77,17 +79,19 @@ function Beets:advance_step(in_beatstep, in_bpm)
   self.current_bpm = in_bpm
 
   if not self.running then
-    self.status = 'NOT RUNNING'
+    self.status = 'Voice ' .. self.id .. ' not running'
     return
   end
 
   if self.loop_count == 0 then
-    self.status = 'LOAD LOOPS IN PARAMS'
+    self.status = 'Voice ' .. self.id .. ': load in params'
     return
+  else
+    self.status = 'Voice ' .. self.id
   end
 
   if self.muted then
-    self.status = 'MUTED'
+    self.status = 'Voice ' .. self.id .. ' MUTED'
     softcut.level(self.id, 0)
   else
     softcut.level(self.id, self.amplitude)
@@ -96,7 +100,7 @@ function Beets:advance_step(in_beatstep, in_bpm)
   if self.editing then
     -- play the current edit position slice every other beat
     -- so that it's easier to hear what the sound is at the start of the slice
-    if self.beatstep % 4 ~= 0 then
+    if self.beatstep % (self.beats_per_bar / 2) ~= 0 then
       self:play_nothing()
     else
       local edit_index = math.floor(self.editing_mode.cursor_location)
@@ -369,7 +373,7 @@ function Beets:load_loop(index, loop)
     loop_info.frames = samples
     loop_info.rate = samplerate / 48000.0 -- compensate for files that aren't 48Khz
     loop_info.duration = samples / 48000.0
-    loop_info.beat_types = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '}
+    loop_info.beat_types = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '}
     loop_info.filename = filename
 
     if kicks then
@@ -387,11 +391,11 @@ function Beets:load_loop(index, loop)
     self:save_loop_info(loop_info)
   end
 
-  loop_info.bpm = (4 * 60) / loop_info.duration
+  loop_info.bpm = ((self.beat_count / 2) * 60) / loop_info.duration
   loop_info.start = index * BREAK_OFFSET + self.id * VOICE_OFFSET
   loop_info.index = index
   loop_info.enabled = 1
-  loop_info.beat_enabled = {1, 1, 1, 1, 1, 1, 1, 1}
+  loop_info.beat_enabled = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}
 
   softcut.buffer_read_mono(filename, 0, loop_info.start, -1, 1, 1)
 
@@ -444,8 +448,13 @@ function Beets:add_params(arcify)
   specs.FILTER_FREQ = ControlSpec.new(20, 20000, 'exp', 0, 20000, 'Hz')
   specs.FILTER_RESONANCE = ControlSpec.new(0.05, 1, 'lin', 0, 0.25, '')
   specs.PERCENTAGE = ControlSpec.new(0, 1, 'lin', 0.01, 0, '%')
-  specs.BEAT_START = ControlSpec.new(0, self.beat_count - 1, 'lin', 1, 0, '')
-  specs.BEAT_END = ControlSpec.new(0, self.beat_count - 1, 'lin', 1, self.beat_count - 1, '')
+
+  local bars_per_loop_options = {1, 2}
+  local max_beat_count = 2 * self.beat_count -- 2 bars
+
+  -- for a 1 bar loop, these values refer to a sequence of 2 loops
+  specs.BEAT_START = ControlSpec.new(0, max_beat_count - 1, 'lin', 1, 0, '')
+  specs.BEAT_END = ControlSpec.new(0, max_beat_count - 1, 'lin', 1, max_beat_count - 1, '')
 
   local files = {}
   local files_count = 0
@@ -466,7 +475,7 @@ function Beets:add_params(arcify)
     self.loops_folder_name = files[1]
   end
 
-  params:add_group('Voice ' .. self.id, 16)
+  params:add_group('Voice ' .. self.id, 17)
 
   params:add {
     type = 'option',
@@ -477,6 +486,40 @@ function Beets:add_params(arcify)
       self.loops_folder_name = files[value]
     end
   }
+
+  params:add {
+    type = 'option',
+    id = self.id .. '_' .. 'bars_per_loop',
+    name = 'Number of bars in loops',
+    options = bars_per_loop_options,
+    action = function(value)
+      self.bars_per_loop = bars_per_loop_options[value]
+      self.beat_count = bars_per_loop_options[value] * self.beats_per_bar
+      self.beat_end = bars_per_loop_options[value] * self.beats_per_bar - 1
+    end
+  }
+
+  params:add {
+    type = 'control',
+    id = self.id .. '_beat_start',
+    name = 'Beat Start',
+    controlspec = specs.BEAT_START,
+    action = function(value)
+      self.beat_start = value
+    end
+  }
+  arcify:register(self.id .. '_beat_start', 0.05)
+
+  params:add {
+    type = 'control',
+    id = self.id .. '_beat_end',
+    name = 'Beat End',
+    controlspec = specs.BEAT_END,
+    action = function(value)
+      self.beat_end = value
+    end
+  }
+  arcify:register(self.id .. '_beat_end', 0.05)
 
   params:add {
     type = 'trigger',
@@ -621,34 +664,13 @@ function Beets:add_params(arcify)
   }
   arcify:register(self.id .. '_' .. 'filter_reso', 0.1)
 
-  params:add {
-    type = 'control',
-    id = self.id .. '_' .. 'beat_start',
-    name = 'Beat Start',
-    controlspec = specs.BEAT_START,
-    action = function(value)
-      self.beat_start = value
-    end
-  }
-  arcify:register(self.id .. '_' .. 'beat_start', 0.05)
-
-  params:add {
-    type = 'control',
-    id = self.id .. '_' .. 'beat_end',
-    name = 'Beat End',
-    controlspec = specs.BEAT_END,
-    action = function(value)
-      self.beat_end = value
-    end
-  }
-  arcify:register(self.id .. '_' .. 'beat_end', 0.05)
 end
 
 local layout = {
-  horiz_spacing = 9,
-  vert_spacing = 9,
   left_margin = 10,
-  top_margin = 10
+  top_margin = 10,
+  rect_width = 9,
+  rect_height = 9
 }
 
 function Beets:_drawCurrentLoopGrid(options)
@@ -657,36 +679,39 @@ function Beets:_drawCurrentLoopGrid(options)
   local loop_index = options.loop_index or self.loop_index
 
   local loop = self.loops_by_filename[self.loop_index_to_filename[loop_index]]
-  for i = 0, 7 do
-    screen.rect(
-      layout.left_margin + layout.horiz_spacing * i,
-      layout.top_margin,
-      layout.horiz_spacing,
-      layout.vert_spacing
-    )
-    if played_index == i then
-      screen.level(15)
-    elseif beatstep == i then
+
+  for h = 1, self.bars_per_loop do
+    for i = 0, (self.beat_count / self.bars_per_loop) - 1 do
+      screen.rect(
+        layout.left_margin + layout.rect_width * i,
+        layout.top_margin + (h - 1) * 2 * layout.top_margin,
+        layout.rect_width,
+        layout.rect_height
+      )
+      if played_index == i + ((h - 1) * self.beat_count / self.bars_per_loop) then
+        screen.level(15)
+      elseif beatstep == i + ((h - 1) * self.beat_count / self.bars_per_loop) then
+        screen.level(2)
+      else
+        screen.level(0)
+      end
+      screen.fill()
+      screen.rect(
+        layout.left_margin + layout.rect_width * i,
+        layout.top_margin + (h - 1) * 2 * layout.top_margin,
+        layout.rect_width,
+        layout.rect_height
+      )
+
+      screen.level(1)
+      screen.move(layout.left_margin + layout.rect_width * i + 2, layout.top_margin  + (h - 1) * 2 * layout.rect_height + 6)
+      screen.text(loop.beat_types[i + 1])
+
       screen.level(2)
-    else
-      screen.level(0)
+      screen.stroke()
+
+      screen.level(15)
     end
-    screen.fill()
-    screen.rect(
-      layout.left_margin + layout.horiz_spacing * i,
-      layout.top_margin,
-      layout.horiz_spacing,
-      layout.vert_spacing
-    )
-
-    screen.level(1)
-    screen.move(layout.left_margin + layout.horiz_spacing * i + 2, layout.top_margin + 6)
-    screen.text(loop.beat_types[i + 1])
-
-    screen.level(2)
-    screen.stroke()
-
-    screen.level(15)
   end
 end
 
@@ -713,13 +738,21 @@ function Beets:grid_key(x, y, z)
       params:set(self.id .. '_' .. 'auto_advance', 1)
     end
   end
-  if y == 1 and x <= self.beat_count then
+
+  -- top row loop controls
+  local adjusted_x = x
+  local offset = 0
+  if (self.bars_per_loop == 1 and self.id == 2 and params:get('orientation') == 1) then
+    offset = 8
+  end
+  adjusted_x = x - offset
+  if y == 1 and adjusted_x <= self.beat_count then
     if self.ui.shift_button == 1 then
       if z == 1 then
-        self:toggle_slice_enabled(x - 1)
+        self:toggle_slice_enabled(adjusted_x - 1)
       end
     elseif z == 1 then
-      self.ui.slice_buttons_down[x] = 1
+      self.ui.slice_buttons_down[adjusted_x] = 1
       local count = 0
       local first, second
       for button_down in pairs(self.ui.slice_buttons_down) do
@@ -737,14 +770,14 @@ function Beets:grid_key(x, y, z)
       end
       if count == 1 then -- for double-tap single-button-loop handling
         if self.ui.slice_button_saved then
-          if self.ui.slice_button_saved == x then
+          if self.ui.slice_button_saved == adjusted_x then
             -- DOUBLE TAP!
-            params:set(self.id .. '_' .. 'beat_start', x - 1)
-            params:set(self.id .. '_' .. 'beat_end', x - 1)
+            params:set(self.id .. '_' .. 'beat_start', adjusted_x - 1)
+            params:set(self.id .. '_' .. 'beat_end', adjusted_x - 1)
           end
           self.ui.slice_button_saved = nil
         else
-          self.ui.slice_button_saved = x
+          self.ui.slice_button_saved = adjusted_x
         end
       else
         self.ui.slice_button_saved = nil
@@ -763,7 +796,7 @@ function Beets:grid_key(x, y, z)
           self.ui.slice_button_saved = nil
         end
       end
-      self.ui.slice_buttons_down[x] = nil
+      self.ui.slice_buttons_down[adjusted_x] = nil
     end
   end
 
@@ -788,7 +821,7 @@ function Beets:grid_key(x, y, z)
   end
 end
 
-function Beets:drawGridUI(g, top_x, top_y)
+function Beets:drawGridUI(g, top_x, top_y, current_voice)
   if self.loop_count == 0 then
     return
   end
@@ -817,18 +850,27 @@ function Beets:drawGridUI(g, top_x, top_y)
   end
   g:led(top_x + 7, top_y + 7, mute_brightness)
 
+  local adjusted_top_x = top_x
+
+  if (self.id == 2) then
+    adjusted_top_x = top_x - ((self.bars_per_loop - 1) * self.beats_per_bar)
+  end
+
   -- beat (0-based)
-  for i = 0, self.beat_count - 1 do
-    if self:slice_is_enabled(i) then
-      if i == self.played_index then
-        g:led(top_x + i, top_y, 15)
-      elseif i >= self.beat_start and i <= self.beat_end then
-        g:led(top_x + i, top_y, 6)
+  -- only draw top row if this instance is current_voice
+  if current_voice == self.id then
+    for i = 0, self.beat_count - 1 do
+      if self:slice_is_enabled(i) then
+        if i == self.played_index then
+          g:led(adjusted_top_x + i, top_y, 15)
+        elseif i >= self.beat_start and i <= self.beat_end then
+          g:led(adjusted_top_x + i, top_y, 6)
+        else
+          g:led(adjusted_top_x + i, top_y, 3)
+        end
       else
-        g:led(top_x + i, top_y, 3)
+        g:led(adjusted_top_x + i, top_y, 1)
       end
-    else
-      g:led(top_x + i, top_y, 1)
     end
   end
 
@@ -847,7 +889,7 @@ function Beets:drawGridUI(g, top_x, top_y)
   local inter_stripe_diff = 1
   for x, name in ipairs(PROBABILITY_ORDER) do
     local value = self.probability[name]
-    range = 5
+    local range = 5
     local scaled_value = value / 100 * range
     local stripe_mod = inter_stripe_diff * (x % 2)
     for i = 1, range do
@@ -874,41 +916,94 @@ function Beets:drawDebugUI()
   end
 end
 
-function Beets:drawPlaybackUI()
+function Beets:beatsToUIPos(beats)
+  return beats * layout.rect_width
+end
+
+function Beets:drawPlaybackUI(multibar_mode, current_voice)
   screen.clear()
   screen.level(15)
 
-  if self.loop_count > 0 then
+  local bars = self.bars_per_loop
+
+  if self.loop_count > 0 and current_voice == self.id then
     self:_drawCurrentLoopGrid {}
 
-    -- draw loop start/end
-    screen.level(6)
-    screen.move(
-      layout.left_margin + self.beat_start * layout.horiz_spacing,
-      layout.top_margin + layout.vert_spacing + 2
-    )
-    screen.line(
-      layout.left_margin + self.beat_start * layout.horiz_spacing,
-      layout.top_margin + layout.vert_spacing + 6
-    )
-    screen.line(
-      layout.left_margin + (self.beat_end + 1) * layout.horiz_spacing,
-      layout.top_margin + layout.vert_spacing + 6
-    )
-    screen.line(
-      layout.left_margin + (self.beat_end + 1) * layout.horiz_spacing,
-      layout.top_margin + layout.vert_spacing + 2
-    )
-    screen.stroke()
+    for i = 1, bars do
+
+      local current_bar_start = i * self.beats_per_bar - self.beats_per_bar
+      local current_bar_end = i * self.beats_per_bar
+
+      screen.level(6)
+
+      -- loop starts in bar
+      if self.beat_start >= current_bar_start and self.beat_start < current_bar_end then
+        screen.move(
+          layout.left_margin + self:beatsToUIPos(self.beat_start - current_bar_start),
+          layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin
+        )
+        screen.line(
+          layout.left_margin + self:beatsToUIPos(self.beat_start - current_bar_start),
+          layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin + 4
+        )
+        -- draw loop line and loop end if it finishes in this bar
+        if self.beat_end < current_bar_end then
+          screen.line(
+            layout.left_margin + self:beatsToUIPos(self.beat_end + 1 - current_bar_start),
+            layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin + 4
+          )
+          screen.line(
+            layout.left_margin + self:beatsToUIPos(self.beat_end + 1 - current_bar_start),
+            layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin
+          )
+        else
+          -- draw loop line but not loop end
+          screen.line(
+            layout.left_margin + self.beats_per_bar * layout.rect_width,
+            layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin + 4
+          )
+        end
+      end
+
+      -- loop starts in previous bars and finishes in later bars
+      if self.beat_start < current_bar_start and self.beat_end > current_bar_end then
+        screen.move(
+          layout.left_margin,
+          layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin + 4
+        )
+        screen.line(
+          layout.left_margin + self.beats_per_bar * layout.rect_width,
+          layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin + 4
+        )
+      end
+
+      -- loop starts in previous bar, ends in this bar
+      if self.beat_start < current_bar_start and self.beat_end >= current_bar_start and self.beat_end <= current_bar_end then
+        screen.move(
+          layout.left_margin,
+          layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin + 4
+        )
+        screen.line(
+          layout.left_margin + self:beatsToUIPos(self.beat_end + 1 - current_bar_start),
+          layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin + 4
+        )
+        screen.line(
+          layout.left_margin + self:beatsToUIPos(self.beat_end + 1 - current_bar_start),
+          layout.top_margin + layout.top_margin * (i - 1) + i * layout.top_margin
+        )
+      end
+
+      screen.stroke()
+    end
 
     -- draw event indicators
     screen.level(15)
-    screen.move(layout.left_margin + self.beat_count * layout.horiz_spacing + 30, layout.top_margin)
+    screen.move(layout.left_margin + self.beat_count * layout.rect_width + 30, layout.top_margin)
     screen.text(self.played_loop_index)
     for y, e in ipairs(EVENT_ORDER) do
       screen.move(
-        layout.left_margin + self.beat_count * layout.horiz_spacing + 30,
-        layout.top_margin + layout.vert_spacing * y
+        layout.left_margin + self.beats_per_bar * layout.rect_width + 30,
+        layout.top_margin + layout.rect_height * y
       )
       if self.events[e] == 1 then
         screen.level(15)
@@ -922,7 +1017,7 @@ function Beets:drawPlaybackUI()
   screen.level(15)
   screen.move(layout.left_margin, 40)
   screen.text(self.message)
-  screen.move(layout.left_margin, 50)
+  screen.move(layout.left_margin, 55)
   screen.text(self.status)
 end
 
@@ -937,7 +1032,7 @@ function Beets:drawEditingUI()
   screen.text('EDIT MODE')
 end
 
-function Beets:drawUI()
+function Beets:drawUI(multibar_mode, current_voice)
   screen.clear()
   screen.level(15)
 
@@ -946,7 +1041,7 @@ function Beets:drawUI()
   elseif self.editing then
     self:drawEditingUI()
   else
-    self:drawPlaybackUI()
+    self:drawPlaybackUI(multibar_mode, current_voice)
   end
 
   screen.update()
